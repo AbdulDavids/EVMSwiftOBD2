@@ -167,7 +167,7 @@ public class OBDService: ObservableObject, OBDServiceDelegate, @unchecked Sendab
     public func startConnection(preferedProtocol: PROTOCOL? = nil, timeout: TimeInterval = 7, peripheral: CBPeripheral? = nil) async throws -> OBDInfo {
         do {
             return try await attemptConnection(preferedProtocol: preferedProtocol, timeout: timeout, peripheral: peripheral)
-        } catch OBDServiceError.adapterConnectionFailed {
+        } catch OBDServiceError.adapterConnectionFailed(let underlying) where Self.isWorthRetrying(underlying) {
             // A transient link drop mid-handshake (the adapter/port still settling
             // right after open) is common on the very first connect and otherwise
             // forces the user to manually retry — one clean retry here covers it.
@@ -177,6 +177,30 @@ public class OBDService: ObservableObject, OBDServiceDelegate, @unchecked Sendab
         }
         // .noAdapterFound already waited out a full BLE scan timeout — retrying
         // immediately would just double that wait for no benefit, so it propagates as-is.
+    }
+
+    /// Which handshake failures are worth one immediate retry.
+    ///
+    /// A transport that dropped while the adapter or port was still settling usually
+    /// succeeds on the second try and costs a second or two to find out. A vehicle-level
+    /// failure does not: `noProtocolFound` has already paid for the ELM327's own ATSP0
+    /// auto-search *plus* a full 12-protocol manual sweep, each miss costing `ATSPn` +
+    /// `0100` + a full command timeout. Repeating that doubles a wait the user is already
+    /// sitting through and ends with the same answer — and because a consuming app may
+    /// well retry on top of this one, a retry here is never as cheap as it looks.
+    private static func isWorthRetrying(_ error: Error) -> Bool {
+        guard let elmError = error as? ELM327Error else {
+            // Transport-level errors (BLE/WiFi/serial) are the transient case this exists for.
+            return true
+        }
+        switch elmError {
+        case .noProtocolFound, .invalidProtocol, .ignitionOff, .invalidResponse:
+            // The vehicle answered (or definitively didn't) — asking again changes nothing.
+            return false
+        case .adapterInitializationFailed, .connectionFailed, .timeout, .unknownError:
+            // The link itself faltered; this is the drop a second attempt recovers from.
+            return true
+        }
     }
 
     private func attemptConnection(preferedProtocol: PROTOCOL?, timeout: TimeInterval, peripheral: CBPeripheral?) async throws -> OBDInfo {

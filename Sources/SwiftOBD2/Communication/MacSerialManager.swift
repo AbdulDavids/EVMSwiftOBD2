@@ -315,7 +315,12 @@ final class MacSerialManager: CommProtocol {
 
     @MainActor
     private func handleError(errno err: Int32) {
-        let reason = String(cString: strerror(err))
+        // strerror_r, not strerror: the latter returns a pointer into a shared static
+        // buffer that another thread's call can overwrite mid-read.
+        var buffer = [CChar](repeating: 0, count: 256)
+        let reason = strerror_r(err, &buffer, buffer.count) == 0
+            ? String(cString: buffer)
+            : "unknown error"
         obdError("Serial read error (errno \(err): \(reason)), disconnecting", category: .connection)
         obdDelegate?.logMessage("Serial: read error — errno \(err) (\(reason)) — disconnecting")
         disconnectPeripheral()

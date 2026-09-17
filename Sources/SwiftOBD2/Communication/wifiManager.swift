@@ -257,6 +257,19 @@ class WifiManager: CommProtocol {
                 if attempt == attempts {
                     throw error
                 }
+                // A fatal socket error cancels the connection (see sendAndReceiveData), and
+                // a cancelled or failed NWConnection never recovers — every remaining
+                // attempt would fail instantly against a dead socket, burning the retry
+                // budget and the sleeps between them for nothing.
+                if let state = tcp?.state {
+                    switch state {
+                    case .cancelled, .failed:
+                        obdDebug("Socket is \(state) — abandoning remaining attempts", category: .communication)
+                        throw error
+                    default:
+                        break
+                    }
+                }
                 obdDebug("Attempt \(attempt) failed, retrying: \(error.localizedDescription)", category: .communication)
             }
         }

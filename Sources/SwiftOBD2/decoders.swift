@@ -43,6 +43,11 @@ public struct Status: Codable, Hashable {
     public var oxygenSensorMonitoring = StatusTest()
     public var oxygenSensorHeaterMonitoring = StatusTest()
     public var egrOrVvtMonitoring = StatusTest()
+
+    // The fields above are public but the synthesized memberwise initializer is not, so
+    // without this a consumer could read a decoded `Status` and never build one — no
+    // previews, no test fixtures, no placeholder while a read is in flight.
+    public init() {}
 }
 
 public struct StatusTest: Codable, Hashable {
@@ -50,7 +55,7 @@ public struct StatusTest: Codable, Hashable {
     public var supported: Bool = false
     public var ready: Bool = false
 
-    init(_ name: String = "", _ supported: Bool = false, _ ready: Bool = false) {
+    public init(_ name: String = "", _ supported: Bool = false, _ ready: Bool = false) {
         self.name = name
         self.supported = supported
         self.ready = ready

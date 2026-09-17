@@ -398,7 +398,10 @@ class BLEManager: NSObject, CommProtocol, BLEPeripheralManagerDelegate {
                 }
                 obdDebug("Retrying after error (attempt \(attempt)/\(attempts)): \(command) - \(error.localizedDescription)",
                          category: .communication)
-                try? await Task.sleep(nanoseconds: UInt64(BLEConstants.retryDelay * 1_000_000_000))
+                // `try`, not `try?`: swallowing the CancellationError here meant a user
+                // disconnect landing during the backoff still issued the next attempt
+                // against a link that is on its way down.
+                try await Task.sleep(nanoseconds: UInt64(BLEConstants.retryDelay * 1_000_000_000))
             }
         }
         // Unreachable — the loop above always returns or throws on its last iteration.

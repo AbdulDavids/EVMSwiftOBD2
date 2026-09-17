@@ -207,7 +207,12 @@ class ELM327 {
         // return here, so let the manual sweep take over instead of surfacing a
         // misleading "invalid ATDPN" message. (PROTOCOL.NONE's raw value is "NONE",
         // not "0", so "0" correctly maps to nil.)
-        let token = first.hasPrefix("A") ? String(first.dropFirst()) : first
+        //
+        // Only strip the marker when something follows it: `PROTOCOL.protocolA`'s own raw
+        // value is "A", so a bare "A" is protocol A (SAE J1939) reported in manual mode,
+        // not an empty auto-mode token. Stripping unconditionally turned that into "" and
+        // sent a correctly-detected J1939 bus down the manual sweep.
+        let token = (first.hasPrefix("A") && first.count > 1) ? String(first.dropFirst()) : first
         guard let obdProtocol = PROTOCOL(rawValue: token) else {
             let msg = "Protocol detect: auto-search found no protocol (ATDPN \(obdProtocolNumber.joined(separator: " ")))"
             obdDelegate?.logMessage(msg)
@@ -623,9 +628,17 @@ extension ELM327 {
                     continue
                 }
 
-                let supportedCommands = OBDCommand.allCommands
-                    .filter { supportedPidsByECU.contains(String($0.properties.command.dropFirst(2))) }
-                    .map { $0 }
+                // Match within the getter's own mode. `dropFirst(2)` strips the mode, so an
+                // unqualified match let one mode's bitmap vouch for another's same-numbered
+                // command: the sweep includes the Mode 6 MID getters (0600, 0620, … 06A0),
+                // whose bitmaps enumerate Mode 6 MIDs, and MID 0x01 being supported marked
+                // Mode 1 PID 01 supported (and vice versa). A bitmap only ever describes its
+                // own mode, so the mode has to be part of the match.
+                let mode = String(pidGetter.properties.command.prefix(2))
+                let supportedCommands = OBDCommand.allCommands.filter {
+                    $0.properties.command.hasPrefix(mode)
+                        && supportedPidsByECU.contains(String($0.properties.command.dropFirst(2)))
+                }
 
                 supportedPIDs.append(contentsOf: supportedCommands)
             } catch {
