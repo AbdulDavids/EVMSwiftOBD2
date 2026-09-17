@@ -54,6 +54,20 @@ enum BLEConstants {
     static let maxBufferSize = 1024
     static let bluetoothPowerOnTimeout: TimeInterval = 30.0
     static let pollingInterval: UInt64 = 100_000_000 // 100ms in nanoseconds
+
+    /// Identifies this central to CoreBluetooth across process launches.
+    ///
+    /// Supplying it is what opts the host app into state preservation and restoration:
+    /// iOS remembers the central's connections and relaunches the app in the background
+    /// when a previously connected peripheral reappears, delivering
+    /// `centralManager(_:willRestoreState:)` before any other delegate callback. Without
+    /// it, an app the system has suspended or terminated simply never wakes for the
+    /// dongle, and a drive that starts before the app is opened is not recorded at all.
+    ///
+    /// Must stay stable: changing it orphans whatever the system has already preserved.
+    /// The host app also needs the `bluetooth-central` background mode, which
+    /// EvmetricsOBD already declares.
+    static let centralRestoreIdentifier = "com.swiftobd2.central.restore"
 }
 
 class BLEManager: NSObject, CommProtocol, BLEPeripheralManagerDelegate {
@@ -98,15 +112,12 @@ class BLEManager: NSObject, CommProtocol, BLEPeripheralManagerDelegate {
         super.init()
         // Use background queue for better performance, but dispatch UI updates to main queue
         let bleQueue = DispatchQueue(label: "com.swiftobd2.ble", qos: .userInitiated)
-        
-        centralManager = CBCentralManager(
-            delegate: self,
-            queue: bleQueue,
-            options: [
-                CBCentralManagerOptionShowPowerAlertKey: true,
-            ]
-        )
 
+        // Components first, central manager second. With a restore identifier the system
+        // delivers `willRestoreState` as the very first delegate callback, right after the
+        // central is created, and that handler reaches straight into `peripheralManager`.
+        // These are implicitly-unwrapped, so creating the central ahead of them (as this
+        // did) would crash on a restore launch.
         messageProcessor = BLEMessageProcessor()
         characteristicHandler = BLECharacteristicHandler(messageProcessor: messageProcessor)
         peripheralManager = BLEPeripheralManager(characteristicHandler: characteristicHandler)
@@ -117,6 +128,15 @@ class BLEManager: NSObject, CommProtocol, BLEPeripheralManagerDelegate {
                 self?.obdDelegate?.adapterInfoUpdated(info)
             }
         }
+
+        centralManager = CBCentralManager(
+            delegate: self,
+            queue: bleQueue,
+            options: [
+                CBCentralManagerOptionShowPowerAlertKey: true,
+                CBCentralManagerOptionRestoreIdentifierKey: BLEConstants.centralRestoreIdentifier,
+            ]
+        )
     }
 
     // MARK: - Central Manager Control Methods
@@ -244,6 +264,49 @@ class BLEManager: NSObject, CommProtocol, BLEPeripheralManagerDelegate {
 
     func connectionEventDidOccur(_: CBCentralManager, event: CBConnectionEvent, peripheral _: CBPeripheral) {
         obdError("Unexpected connection event: \(event.rawValue)", category: .bluetooth)
+    }
+
+    /// Reattach to whatever CoreBluetooth was holding for us in a previous process.
+    ///
+    /// Called when iOS relaunches the app in the background because a preserved
+    /// connection came back, and also on an ordinary launch when the system still holds
+    /// state for this central. It arrives before `centralManagerDidUpdateState`, so the
+    /// central is not necessarily powered on yet; all this does is re-adopt the objects,
+    /// and the normal state machine takes over from there.
+    ///
+    /// Restored peripherals are the same `CBPeripheral` instances the system had, but
+    /// their delegates are not restored, so anything already connected has to be handed
+    /// back to `peripheralManager` to re-attach the delegate and rediscover services.
+    /// A peripheral still mid-connect is tracked as pending instead, so a later
+    /// disconnect has something to cancel.
+    func didRestoreState(_: CBCentralManager, restored: [CBPeripheral]) {
+        guard !restored.isEmpty else {
+            obdDebug("Bluetooth restore: nothing preserved", category: .bluetooth)
+            return
+        }
+
+        if let connected = restored.first(where: { $0.state == .connected }) {
+            obdInfo("Bluetooth restore: resuming \(connected.name ?? "Unnamed")", category: .bluetooth)
+            pendingConnectPeripheral = nil
+            // Re-attaches the delegate and rediscovers services, exactly as didConnect
+            // does, so characteristics set up and the ELM327 session resumes through the
+            // existing path rather than a parallel one.
+            peripheralManager.setPeripheral(connected)
+            return
+        }
+
+        if let connecting = restored.first(where: { $0.state == .connecting }) {
+            obdInfo("Bluetooth restore: connect still in flight to \(connecting.name ?? "Unnamed")",
+                    category: .bluetooth)
+            pendingConnectPeripheral = connecting
+            let oldState = connectionState
+            connectionState = .connecting
+            OBDLogger.shared.logConnectionChange(from: oldState, to: connectionState)
+            return
+        }
+
+        obdDebug("Bluetooth restore: \(restored.count) peripheral(s), none connected",
+                 category: .bluetooth)
     }
 
     // MARK: - Async Methods
@@ -487,6 +550,13 @@ extension BLEManager: CBCentralManagerDelegate {
 
     func centralManagerDidUpdateState(_ central: CBCentralManager) {
         didUpdateState(central)
+    }
+
+    /// Must be implemented for state restoration to work at all: CoreBluetooth only
+    /// preserves a central's state if its delegate responds to this.
+    func centralManager(_ central: CBCentralManager, willRestoreState dict: [String: Any]) {
+        let restored = dict[CBCentralManagerRestoredStatePeripheralsKey] as? [CBPeripheral] ?? []
+        didRestoreState(central, restored: restored)
     }
 
     func centralManager(_ central: CBCentralManager, didFailToConnect peripheral: CBPeripheral, error: Error?) {
