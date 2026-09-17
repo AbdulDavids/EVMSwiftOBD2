@@ -368,7 +368,10 @@ class BLEManager: NSObject, CommProtocol, BLEPeripheralManagerDelegate {
 
         // `retries` used to be discarded here (`retries _: Int`), so every BLE command
         // was single-shot regardless of what the caller asked for — a dropped/timed-out
-        // response just failed instead of getting a second attempt.
+        // response just failed instead of getting a second attempt. The WiFi transport
+        // always honored retries, so the same vehicle behaved differently per transport:
+        // K-line detection (ISO 9141 / KWP 5-baud init takes 5-10 s inside the ELM327
+        // while it prints "SEARCHING...") could never fit BLE's single 3 s window.
         let attempts = max(1, retries)
         for attempt in 1...attempts {
             obdDebug(attempt == 1 ? "Sending command: \(command)"
