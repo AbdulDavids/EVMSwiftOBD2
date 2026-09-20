@@ -716,10 +716,20 @@ struct BatchedResponse {
         let valueData = response.prefix(size)
 
         response.removeFirst(size)
-        //        print("Buffer: \(buffer.compactMap { String(format: "%02X ", $0) }.joined())")
-        let result = cmd.properties.decode(data: valueData, unit: unit)
 
-        
+        // `size` (properties.bytes) counts the PID echo byte that precedes a
+        // mode-01 response's data bytes (e.g. RPM's `bytes: 3` = 1 echo + 2
+        // data bytes), matching how sendCommand's single-PID path already
+        // drops it before decoding (`responseData.dropFirst()`). Decoders
+        // here were never getting that drop, so the echo byte itself was
+        // decoded as the value's high byte — e.g. RPM's echo byte 0x0C
+        // (or any other PID's echo byte, when it landed there instead)
+        // producing a huge out-of-range RPM, and single-byte percent/temp
+        // PIDs silently reading their own echo byte as if it were the data
+        // byte. Dropping it here fixes every batched PID at once instead of
+        // working around the symptom per decoder.
+        let dataBytes = valueData.dropFirst()
+        let result = cmd.properties.decode(data: dataBytes, unit: unit)
 
         switch result {
         case let .success(measurementResult):
