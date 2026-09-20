@@ -46,4 +46,30 @@ final class BatchedResponseTests: XCTestCase {
 
         XCTAssertEqual(coolant?.value, Double(0x5A) - 40.0, accuracy: 0.01)
     }
+
+    func testExtractValueDecodesVehicleSpeedsGenuinelyOneDataByte() {
+        // Regression: on a real vehicle at a stop, 010D's batched slice was
+        // exactly [0D, 00] — echo byte + a single 0 km/h data byte — but
+        // decoding failed with "No data received" because the UAS table
+        // entry for speed's ID (0x09) had minBytes: 2, left over from before
+        // this file's fix started actually dropping the echo byte. Before
+        // that fix, the still-present echo byte coincidentally padded the
+        // count to 2 and slipped past the check (while decoding garbage);
+        // after it, the genuinely 1-byte reading correctly failed the
+        // 2-byte minimum. Speed is 1 data byte per SAE J1979 — this must
+        // succeed, not throw.
+        let response = Data([0x0D, 0x00])
+        var batch = BatchedResponse(response: response, .metric)
+
+        let speed = batch.extractValue(.mode1(.speed))
+        XCTAssertEqual(speed?.value, 0, accuracy: 0.01)
+    }
+
+    func testExtractValueDecodesNonZeroVehicleSpeed() {
+        let response = Data([0x0D, 0x64]) // 100 km/h
+        var batch = BatchedResponse(response: response, .metric)
+
+        let speed = batch.extractValue(.mode1(.speed))
+        XCTAssertEqual(speed?.value, 100, accuracy: 0.01)
+    }
 }

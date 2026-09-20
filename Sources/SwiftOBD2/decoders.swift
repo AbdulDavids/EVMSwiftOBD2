@@ -200,7 +200,15 @@ private var uasIDS: [UInt8: UAS] = {
     0x06: UAS(signed: false, scale: 0.000305, unit: Unit.count),
     // Multi-byte types — minBytes: 2 rejects garbage 1-byte default responses (e.g. 0x11)
     0x07: UAS(signed: false, scale: 0.25, unit: Unit.rpm, minBytes: 2),
-    0x09: UAS(signed: false, scale: 1, unit: UnitSpeed.kilometersPerHour, minBytes: 2),
+    // 0x09 (Vehicle Speed) is genuinely 1 data byte per SAE J1979 — its
+    // CommandProperties("010D", ...) bytes: 2 is 1 PID-echo byte + 1 data
+    // byte, matching 0-255 km/h directly. minBytes: 2 here rejected every
+    // legitimate 1-byte speed reading once BatchedResponse.extractValue
+    // started correctly dropping the echo byte first (previously the echo
+    // byte accidentally padded this to 2 bytes and slipped past the check
+    // by coincidence, while still decoding the wrong value). Do not copy
+    // the minBytes: 2 pattern here — this one really is 1-byte.
+    0x09: UAS(signed: false, scale: 1, unit: UnitSpeed.kilometersPerHour),
 
     0x0A: UAS(signed: false, scale: 0.122, unit: UnitElectricPotentialDifference.millivolts, minBytes: 2),
     0x0B: UAS(signed: false, scale: 0.001, unit: UnitElectricPotentialDifference.volts, minBytes: 2),
