@@ -285,4 +285,44 @@ final class decodersTests: XCTestCase {
             XCTFail("Monitor decoding failed")
         }
     }
+
+    // PID 01 A6 — 4-byte big-endian value scaled by 0.1 km per SAE J1979-2.
+    func testOdometer() {
+        let tests: [Data: MeasurementResult] = [
+            Data([0x00, 0x00, 0x00, 0x00]): MeasurementResult(value: 0, unit: UnitLength.kilometers),
+            // 1,234,567 * 0.1 = 123,456.7 km
+            Data([0x00, 0x12, 0xD6, 0x87]): MeasurementResult(value: 123_456.7, unit: UnitLength.kilometers),
+        ]
+        for (data, expected) in tests {
+            switch OdometerDecoder().decode(data: data, unit: .metric) {
+            case let .success(result):
+                XCTAssertEqual(result.measurementResult!.value, expected.value, accuracy: 0.01)
+                XCTAssertEqual(result.measurementResult!.unit, expected.unit)
+            case let .failure(error):
+                XCTFail("Unexpected error: \(error)")
+            }
+        }
+    }
+
+    func testOdometerRejectsShortData() {
+        switch OdometerDecoder().decode(data: Data([0x00, 0x01]), unit: .metric) {
+        case .success:
+            XCTFail("Expected failure for fewer than 4 data bytes")
+        case .failure(.invalidData):
+            break
+        case let .failure(error):
+            XCTFail("Expected .invalidData, got \(error)")
+        }
+    }
+
+    func testOdometerConvertsToImperial() {
+        switch OdometerDecoder().decode(data: Data([0x00, 0x00, 0x03, 0xE8]), unit: .imperial) {
+        case let .success(result):
+            // 1000 * 0.1 km = 100 km -> miles
+            XCTAssertEqual(result.measurementResult!.value, 100 * 0.621371, accuracy: 0.01)
+            XCTAssertEqual(result.measurementResult!.unit, UnitLength.miles)
+        case let .failure(error):
+            XCTFail("Unexpected error: \(error)")
+        }
+    }
 }
