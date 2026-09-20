@@ -328,6 +328,7 @@ public enum Decoders: Equatable, Encodable {
     case count
     case cvn
     case encoded_string
+    case odometer
     case none
 
     func getDecoder() -> Decoder? {
@@ -391,6 +392,8 @@ public enum Decoders: Equatable, Encodable {
             case .uas(let id):
                 let decoder = UASDecoder(id: id)
                 return decoder
+            case .odometer:
+                return OdometerDecoder()
             default:
                 return nil
             }
@@ -645,6 +648,25 @@ struct PressureDecoder: Decoder {
     func decode(data: Data, unit: MeasurementUnit) -> Result<DecodeResult, DecodeError> {
         let value = data.first ?? 0
         return .success(.measurementResult(MeasurementResult(value: Double(value), unit: UnitPressure.kilopascals)))
+    }
+}
+
+/// PID 01 A6 (added in a later SAE J1979 revision than the rest of Mode 01;
+/// support is manufacturer-dependent and many vehicles don't expose it at
+/// all — callers should treat a failure/NO DATA here as "not supported by
+/// this vehicle", not a transport error). 4 data bytes, big-endian, unsigned,
+/// scaled by 0.1 km per SAE J1979-2.
+struct OdometerDecoder: Decoder {
+    func decode(data: Data, unit: MeasurementUnit) -> Result<DecodeResult, DecodeError> {
+        guard data.count >= 4 else { return .failure(.invalidData) }
+        let raw = bytesToInt(data.prefix(4))
+        var km = Double(raw) * 0.1
+        var lengthUnit: Unit = UnitLength.kilometers
+        if unit == .imperial {
+            km *= 0.621371
+            lengthUnit = UnitLength.miles
+        }
+        return .success(.measurementResult(MeasurementResult(value: km, unit: lengthUnit)))
     }
 }
 

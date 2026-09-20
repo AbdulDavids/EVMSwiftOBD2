@@ -730,7 +730,7 @@ extension OBDCommand.Mode1 {
         case .evapSystemPressureAlt2: return CommandProperties("01A3", "Evap system vapor pressure", 10, .none, true)
         case .transmissionActualGear: return CommandProperties("01A4", "Transmission actual gear", 5, .none, true)
         case .commandedDEFdosing: return CommandProperties("01A5", "Commanded DEF dosing", 5, .none, true)
-        case .odometer: return CommandProperties("01A6", "Odometer", 5, .none, true)
+        case .odometer: return CommandProperties("01A6", "Odometer", 5, .odometer, true)
         case .noxSensorConc34: return CommandProperties("01A7", "NOx sensor concentration 3/4", 5, .none, true)
         case .noxSensorCorrectedConc34: return CommandProperties("01A8", "NOx sensor corrected concentration 3/4", 5, .none, true)
         case .absDisableSwitch: return CommandProperties("01A9", "ABS disable switch", 5, .none)
