@@ -358,7 +358,23 @@ public class OBDService: ObservableObject, OBDServiceDelegate, @unchecked Sendab
         // regardless of which PIDs happen to be in the request.
         var results: [OBDCommand: MeasurementResult] = [:]
         for chunk in commands.chunked(intoByteBudget: Self.maxResponseBytesPerRequest, weightedBy: \.properties.bytes) {
-            let response = try await sendCommandInternal("01" + chunk.compactMap { $0.properties.command.dropFirst(2) }.joined(), retries: 10)
+            let response: [String]
+            do {
+                response = try await sendCommandInternal("01" + chunk.compactMap { $0.properties.command.dropFirst(2) }.joined(), retries: 10)
+            } catch {
+                // "NO DATA" is a routine, spec-defined answer — a PID this
+                // ECU doesn't support right now (or ever), not a transport
+                // failure. One unsupported PID sharing a chunk with several
+                // supported ones must not discard every chunk's results,
+                // including ones from earlier iterations of this same call
+                // that already succeeded: skip just this chunk's PIDs (they
+                // stay absent from `results`, exactly like an empty
+                // response) and keep going. Anything else (write failed,
+                // timeout, disconnected, …) is a real problem — propagate it
+                // so the caller can react (see OBDViewModel's poll loop).
+                if Self.isNoDataError(error) { continue }
+                throw error
+            }
 
             guard let responseData = try elm327.canProtocol?.parse(response).first?.data else { continue }
 
@@ -382,6 +398,20 @@ public class OBDService: ObservableObject, OBDServiceDelegate, @unchecked Sendab
     /// own echo byte, so summing it directly against this ceiling is the
     /// right unit — no separate per-PID accounting needed.
     private static let maxResponseBytesPerRequest = 6
+
+    /// True when `error` is (possibly wrapped in `OBDServiceError.commandFailed`)
+    /// `BLEManagerError.noData` — a "NO DATA" reply from the adapter, meaning
+    /// the ECU understood the request and definitively has nothing to say for
+    /// (at least one of) the PIDs asked, not a transport-level failure. Used
+    /// by `requestPIDs` to tell "this chunk's PID(s) aren't available right
+    /// now" apart from "the connection/transport itself is broken."
+    static func isNoDataError(_ error: Error) -> Bool {
+        if case BLEManagerError.noData = error { return true }
+        if case let OBDServiceError.commandFailed(_, underlying) = error {
+            return isNoDataError(underlying)
+        }
+        return false
+    }
 
     /// Sends an OBD2 command to the vehicle and returns the raw response.
     ///  - Parameter command: The OBD2 command to send.
