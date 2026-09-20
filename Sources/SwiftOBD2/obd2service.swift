@@ -342,15 +342,22 @@ public class OBDService: ObservableObject, OBDServiceDelegate, @unchecked Sendab
     /// - Throws: Errors that might occur during the request process.
     public func requestPIDs(_ commands: [OBDCommand], unit: MeasurementUnit) async throws -> [OBDCommand: MeasurementResult] {
         // A mode-01 request concatenates every requested PID into one query
-        // string ("010C0D0511..."). SAE J1979 caps a single request at 6 data
-        // bytes beyond the mode byte under CAN framing, and in practice many
-        // ECUs return a flat "NO DATA" for the whole query once that's
-        // exceeded rather than answering the PIDs that would've fit.
-        // Chunking keeps each individual request within that limit and
-        // merges the results, so a long poll list still costs a few
-        // round-trips instead of coming back empty every cycle.
+        // string ("010C0D0511..."). SAE J1979 caps a single request/response
+        // at 6 data bytes beyond the mode byte under CAN framing (a 7-byte
+        // frame payload), and in practice many ECUs return a flat "NO DATA"
+        // for the whole query once that's exceeded rather than answering the
+        // PIDs that would've fit. Chunking by *PID count* alone isn't enough:
+        // most mode-1 PIDs answer with 1-2 data bytes, but some (RPM, MAF,
+        // O2 sensor voltages, run time, distance, fuel rail pressure, …)
+        // answer with 2-5. Five 2-byte-response PIDs is only 5 PIDs but
+        // already 10 response bytes — comfortably over the 6-byte cap while
+        // still under the old 6-PID limit, so a batch could silently exceed
+        // the real constraint and come back as one empty response. Chunking
+        // by the actual response byte budget (properties.bytes, which is 1
+        // echo byte + N data bytes per PID) tracks the real constraint
+        // regardless of which PIDs happen to be in the request.
         var results: [OBDCommand: MeasurementResult] = [:]
-        for chunk in commands.chunked(into: Self.maxPIDsPerRequest) {
+        for chunk in commands.chunked(intoByteBudget: Self.maxResponseBytesPerRequest, weightedBy: \.properties.bytes) {
             let response = try await sendCommandInternal("01" + chunk.compactMap { $0.properties.command.dropFirst(2) }.joined(), retries: 10)
 
             guard let responseData = try elm327.canProtocol?.parse(response).first?.data else { continue }
@@ -364,12 +371,17 @@ public class OBDService: ObservableObject, OBDServiceDelegate, @unchecked Sendab
         return results
     }
 
-    /// Maximum PIDs bundled into a single mode-01 query. SAE J1979 allows up
-    /// to 6 data bytes per request under CAN framing (7-byte frame minus the
-    /// mode byte) — this stays at that ceiling so vehicles which enforce the
-    /// spec strictly (rather than accepting a longer multi-frame query) get a
-    /// request they'll actually answer.
-    private static let maxPIDsPerRequest = 6
+    /// Maximum total response bytes (echo + data, across every PID in the
+    /// chunk) bundled into a single mode-01 query, not counting the leading
+    /// mode-response byte (41) which isn't part of any PID's own
+    /// properties.bytes. SAE J1979's 7-byte CAN frame payload is 1 mode byte
+    /// + up to 6 bytes of PID echoes and data, so 6 is the ceiling here —
+    /// this stays at that limit so vehicles which enforce the spec strictly
+    /// (rather than accepting a longer multi-frame query) get a request
+    /// they'll actually answer. properties.bytes already counts each PID's
+    /// own echo byte, so summing it directly against this ceiling is the
+    /// right unit — no separate per-PID accounting needed.
+    private static let maxResponseBytesPerRequest = 6
 
     /// Sends an OBD2 command to the vehicle and returns the raw response.
     ///  - Parameter command: The OBD2 command to send.
@@ -655,12 +667,42 @@ public struct VINInfo: Codable, Hashable {
 
 extension Array {
     /// Splits into consecutive slices of at most `size` elements each. The
-    /// last slice may be shorter. Used by `requestPIDs` to keep each mode-01
-    /// query within the PID count a vehicle will actually answer.
+    /// last slice may be shorter.
     func chunked(into size: Int) -> [[Element]] {
         guard size > 0 else { return [self] }
         return stride(from: 0, to: count, by: size).map {
             Array(self[$0 ..< Swift.min($0 + size, count)])
         }
+    }
+
+    /// Splits into consecutive slices whose per-element weights (via
+    /// `weight`) sum to at most `budget` each — used by `requestPIDs` to keep
+    /// every mode-01 query's *response* within the single-CAN-frame byte
+    /// budget a vehicle will actually answer without needing a multi-frame
+    /// ISO-TP reply, rather than just capping how many PIDs are in a chunk
+    /// (PID count alone doesn't track this: a handful of multi-byte PIDs can
+    /// blow the byte budget well before hitting any PID-count ceiling).
+    ///
+    /// A single element whose own weight already exceeds `budget` still gets
+    /// its own chunk rather than being dropped — the caller sends it alone
+    /// and it may or may not be answerable, but silently discarding it would
+    /// be worse.
+    func chunked(intoByteBudget budget: Int, weightedBy weight: (Element) -> Int) -> [[Element]] {
+        guard budget > 0 else { return [self] }
+        var chunks: [[Element]] = []
+        var current: [Element] = []
+        var currentWeight = 0
+        for element in self {
+            let elementWeight = weight(element)
+            if !current.isEmpty && currentWeight + elementWeight > budget {
+                chunks.append(current)
+                current = []
+                currentWeight = 0
+            }
+            current.append(element)
+            currentWeight += elementWeight
+        }
+        if !current.isEmpty { chunks.append(current) }
+        return chunks
     }
 }
